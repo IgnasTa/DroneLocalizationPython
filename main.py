@@ -1,4 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Query
+from typing import Optional
+from pydantic import BaseModel
 import torch
 import cv2
 import os
@@ -7,8 +9,7 @@ import numpy as np
 
 from DiscardSmallObjects import remove_small_objects
 from ExifMetadata import extrat_lat_lon
-from MatchToMap import predict
-from MatchToMapWIthRotation import predict_with_rotation
+from MatchToMapWIthRotation import predict_with_scipy
 from MatchToMapv3 import predict_with_scipy
 from PredictLargeImage import predict_large_image
 from RotateImage import correct_yaw
@@ -21,7 +22,7 @@ app = FastAPI()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = UNetFormer().to(device)
-state_dict = torch.load("unet_former_with_moving_and_static_cars_as_road.pth", map_location=device)
+state_dict = torch.load("unet_former.pth", map_location=device)
 model.load_state_dict(state_dict)
 
 # Global variables for video processing
@@ -31,6 +32,35 @@ video_metadata: dict = {
     "altitude": None
 }
 video_processing_lock = False
+g_model_name = "unet_former"
+g_fov = 0.0
+g_coordinate_system = "EPSG:4326"
+g_focal = 8.8
+g_sensor_width = 13.2
+
+class ConfigurationPreset(BaseModel):
+    model: Optional[str] = None
+    focal: Optional[float] = None
+    sensor_width: Optional[float] = None
+    fov: Optional[float] = None
+    coordinate: Optional[str] = None
+@app.post("/conf")
+async def receive_configuration(data: ConfigurationPreset):
+    global g_model_name, g_fov, g_coordinate_system, g_focal, g_sensor_width
+
+    # Only update global variables if the parameter was provided (is not None)
+    if data.model is not None:
+        g_model_name = data.model
+    if data.focal is not None:
+        g_focal = data.focal
+    if data.sensor_width is not None:
+        g_sensor_width = data.sensor_width
+    if data.fov is not None:
+        g_fov = data.fov
+    if data.coordinate is not None:
+        g_coordinate_system = data.coordinate
+
+    return {"status": "success", "message": "Globals updated only for provided values"}
 
 @app.post("/")
 async def root(file: UploadFile = File(...)):
@@ -71,7 +101,7 @@ async def root(file: UploadFile = File(...)):
         print(f"Image dimensions: {Y}x{X} pixels")
 
         # 4. Predict road mask
-        img, pred = predict_large_image(model, img, device)
+        img, pred = predict_large_image(model, img, device,model_name=g_model_name)
         mask = remove_small_objects(pred)
 
         # 5. Rotate by yaw
@@ -90,7 +120,11 @@ async def root(file: UploadFile = File(...)):
             altitude_m=altitude,
             image_width_px=Y,
             image_height_px=X,
-            graph=graph
+            graph=graph,
+            sensor_width_mm=g_sensor_width,
+            focal_length_mm=g_focal,
+            fov=g_fov,
+            coordinate_system=g_coordinate_system
         )
 
         # 10. Clean up
@@ -195,13 +229,17 @@ async def photoFromVideo(file: UploadFile = File(...)):
         graph = skeleton_to_graph("drone_road_skeleton_3346.tif")
 
         # 8. Match to OSM and get aligned coordinates
-        aligned_gdf = predict_with_rotation(
+        aligned_gdf = predict_with_scipy(
             drone_lat=drone_lat_noisy,
             drone_lon=drone_lon_noisy,
             altitude_m=altitude,
             image_width_px=Y,
             image_height_px=X,
-            graph=graph
+            graph=graph,
+            sensor_width_mm=g_sensor_width,
+            focal_length_mm=g_focal,
+            fov=g_fov,
+            coordinate_system=g_coordinate_system
         )
 
         # 9. Extract aligned center coordinates

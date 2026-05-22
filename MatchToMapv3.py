@@ -62,18 +62,44 @@ def rigid_transform_2d(pts, tx, ty, angle_deg):
 
 
 # ====================== MAIN REPLACEMENT FUNCTION ======================
-def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_height_px, graph, yaw_deg=0):
+def predict_with_scipy(
+    drone_lat,
+    drone_lon,
+    altitude_m,
+    image_width_px,
+    image_height_px,
+    graph,
+    yaw_deg=0,
+    fov=None,
+    sensor_width_mm=13.2,
+    focal_length_mm=8.8,
+    coordinate_system="EPSG:4326"
+
+):
     drone_lat = float(drone_lat)
     drone_lon = float(drone_lon)
     altitude_m = float(altitude_m)
 
-    # 1. Coarse Affine Logic
-    sensor_width_mm, focal_length_mm = 13.2, 8.8
-    gsd = (sensor_width_mm / 1000.0 * altitude_m) / (focal_length_mm / 1000.0 * image_width_px)
+    # Basic input validation
+    if float(image_width_px) <= 0 or float(image_height_px) <= 0:
+        raise ValueError("image_width_px and image_height_px must be positive integers")
+    if fov is not None:
+        try:
+            fov_deg = float(fov)
+        except Exception:
+            raise ValueError("fov must be numeric (degrees) or None")
+        if not (0.0 < fov_deg < 180.0):
+            print(f"Warning: fov value {fov_deg} is outside (0, 180) degrees; results may be invalid.")
+        ground_width_m = 2.0 * altitude_m * math.tan(math.radians(fov_deg) / 2.0)
+        gsd = ground_width_m / float(image_width_px)
+        used_method = f"fov-based ({fov_deg} deg)"
+    else:
+        gsd = (sensor_width_mm / 1000.0 * altitude_m) / (focal_length_mm / 1000.0 * image_width_px)
+        used_method = f"sensor/focal-based (sensor {sensor_width_mm} mm, focal {focal_length_mm} mm)"
 
     gsd_lat_deg = gsd / 111000
     gsd_lon_deg = gsd / (111000 * math.cos(math.radians(drone_lat)))
-
+    print(f"Using GSD calculation method: {used_method}; computed GSD = {gsd:.4f} m/px")
     half_w = (image_width_px / 2.0) * gsd_lon_deg
     half_h = (image_height_px / 2.0) * gsd_lat_deg
 
@@ -96,7 +122,7 @@ def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_h
         if len(coords) > 1:
             edges.append(LineString(coords))
 
-    drone_gdf = gpd.GeoDataFrame(geometry=edges, crs="EPSG:4326")
+    drone_gdf = gpd.GeoDataFrame(geometry=edges, crs=coordinate_system)
 
     # 2. Fetch & Project OSM
     print("Fetching OSM basemap data...")
@@ -106,7 +132,7 @@ def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_h
     osm_gdf = ox.graph_to_gdfs(G_osm_proj, nodes=False, edges=True)
 
     crs_utm = G_osm_proj.graph['crs']
-    transformer = pyproj.Transformer.from_crs("EPSG:4326", crs_utm, always_xy=True)
+    transformer = pyproj.Transformer.from_crs(coordinate_system, crs_utm, always_xy=True)
     drone_utm_x, drone_utm_y = transformer.transform(drone_lon, drone_lat)
     # Convert Drone Graph to meters
     drone_gdf_utm = drone_gdf.to_crs(crs_utm)
@@ -121,25 +147,18 @@ def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_h
 
     print(f"Tracking Nodes -> Drone: {len(custom_pts)} pts | OSM: {len(osm_pts)} pts")
 
-    # =========================================================================
-    # 4. SciPy Optimization Block (ICP Replacement)
-    # =========================================================================
-    # Build a spatial tree out of our static background (OSM) map
+    # 4. SciPy Optimization Block
     osm_tree = KDTree(osm_pts)
 
     # Loss function: Total Mean Squared Distance to the nearest road line
     def alignment_loss(params):
         tx, ty, delta_yaw = params
-        # Apply the current transformation guess to the drone points
         transformed_drone = rigid_transform_2d(custom_pts, tx, ty, delta_yaw)
-        # Query tree for distances to closest OSM points
         distances, _ = osm_tree.query(transformed_drone)
         return np.mean(distances ** 2)
 
-    # Initial guess: assume the affine map is perfect [dX=0, dY=0, dYaw=0]
     initial_guess = [0.0, 0.0, 0.0]
 
-    # Explicitly set bounds: Max +/- 25 meters translation, Max +/- 15 degrees rotation adjustment
     optimization_bounds = [(-50.0, 50.0), (-50.0, 50.0), (-25.0, 25.0)]
 
     print("Running optimization alignment...")
@@ -164,37 +183,10 @@ def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_h
     drone_point_utm = Point(drone_utm_x, drone_utm_y)
 
     aligned_drone_point_utm = affinity.translate(drone_point_utm, xoff=final_tx, yoff=final_ty)
-    reverse_transformer = pyproj.Transformer.from_crs(crs_utm, "EPSG:4326", always_xy=True)
+    reverse_transformer = pyproj.Transformer.from_crs(crs_utm, coordinate_system, always_xy=True)
     true_aligned_lon, true_aligned_lat = reverse_transformer.transform(aligned_drone_point_utm.x,
                                                                        aligned_drone_point_utm.y)
 
-
-
-
-
-    # =========================================================================
-    # NEW GEOSPATIAL ALIGNMENT BLOCK
-    # =========================================================================
-    # 1. Project your original drone geometries into the metric UTM space
-    # drone_gdf_utm = drone_gdf.to_crs(crs_utm)
-    #
-    # # 2. Replicate the optimization steps using GeoPandas:
-    # # First, rotate the lines around the drone's original UTM center point
-    # rotated_gdf_utm = drone_gdf_utm.rotate(final_dyaw, origin=(drone_utm_x, drone_utm_y))
-    #
-    # # Second, translate the rotated lines by the optimal X and Y meter offsets
-    # aligned_gdf_utm = rotated_gdf_utm.translate(xoff=final_tx, yoff=final_ty)
-    #
-    # # 3. Project the beautifully snapped geometries back to geographic degrees (WGS84)
-    # # We must explicitly set the geometry column back to a true GeoDataFrame structure
-    # aligned_gdf = gpd.GeoDataFrame(geometry=aligned_gdf_utm, crs=crs_utm).to_crs("EPSG:4326")
-    #
-    # # 4. Calculate the new geolocated center point
-    # center_point = aligned_gdf.unary_union.centroid
-    # aligned_lat = float(center_point.y)
-    # aligned_lon = float(center_point.x)
-
-    # 5. Measure and display the precision telemetry
     orig_coords = (drone_lat, drone_lon)
     aligned_coords = (true_aligned_lat, true_aligned_lon)
     dist_m = geodesic(orig_coords, aligned_coords).meters
@@ -204,7 +196,4 @@ def predict_with_scipy(drone_lat, drone_lon, altitude_m, image_width_px, image_h
     print(f"Aligned Center:  {true_aligned_lat:.6f}, {true_aligned_lon:.6f}")
     print(f"Total Shift Distance: {dist_m:.2f} meters")
 
-    # 6. Save the perfectly aligned map file
-    # aligned_gdf.to_file("snapped_gdf_roads.gpkg", driver="GPKG")
-    print("Saved aligned network to 'snapped_gdf_roads.gpkg'")
     return true_aligned_lat, true_aligned_lon

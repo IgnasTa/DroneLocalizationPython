@@ -3,7 +3,12 @@ import numpy as np
 import torch
 
 
-def predict_large_image(model, img, device, tile_size=1024, stride=512):
+def predict_large_image(model, img, device, tile_size=1024, stride=512,
+    model_name="unet_former"):
+    if model_name!="unet_former":
+        model_name = model_name + ".pth"
+        state_dict = torch.load(model_name, map_location=device)
+        model.load_state_dict(state_dict)
     model.eval()
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     H, W, _ = img.shape

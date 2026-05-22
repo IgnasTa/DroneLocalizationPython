@@ -32,5 +32,3 @@ def extrat_lat_lon(image):
             print("GPS data not found in EXIF.")
 
 
-lat_orig, lon_orig = extrat_lat_lon("DJI_0451.jpg")
-
