@@ -20,3 +20,4 @@ einops
 exif
 imagecodecs
 python-multipart
+open3d

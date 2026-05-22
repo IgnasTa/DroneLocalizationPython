@@ -9,6 +9,7 @@ from DiscardSmallObjects import remove_small_objects
 from ExifMetadata import extrat_lat_lon
 from MatchToMap import predict
 from MatchToMapWIthRotation import predict_with_rotation
+from MatchToMapv3 import predict_with_scipy
 from PredictLargeImage import predict_large_image
 from RotateImage import correct_yaw
 from SkeletonToGraph import skeleton_to_graph
@@ -31,35 +32,12 @@ video_metadata: dict = {
 }
 video_processing_lock = False
 
-
-# @app.get("/")
-# async def root():
-#     photo_path ="DJI_0444.jpg"
-#     yaw, altitude = extract_xmp_pure_python(photo_path)
-#     drone_lat, drone_lon = extrat_lat_lon(photo_path)
-#     img = cv2.imread(photo_path)
-#     X, Y, _ = img.shape
-#     print(X,Y)
-#
-#     img, pred = predict_large_image(model, img, device)
-#
-#     mask = remove_small_objects(pred)
-#
-#     correct_yaw(mask, yaw)  # saves as "drone_road_mask_rotated.png"
-#     #
-#     skeletonize_mask("drone_road_mask_rotated.png", "drone_road_skeleton_3346.tif")
-#     #
-#     graph = skeleton_to_graph("drone_road_skeleton_3346.tif")
-#     predict(drone_lat=drone_lat, drone_lon=drone_lon, altitude_m=altitude, image_width_px=Y, image_height_px=X,
-#             graph=graph)
-#     return {"message": "Hello World"}
-
-
 @app.post("/")
 async def root(file: UploadFile = File(...)):
     """Upload an image and get aligned GPS coordinates"""
     try:
-        addNoise = True
+        addNoise = False
+
         # 1. Save uploaded file
         photo_path = f"uploaded_{file.filename}"
         contents = await file.read()
@@ -75,18 +53,14 @@ async def root(file: UploadFile = File(...)):
         print(f"Original GPS: ({drone_lat:.6f}, {drone_lon:.6f}), Yaw: {yaw}°, Altitude: {altitude}m")
 
         if addNoise:
-            # 3. Add random GPS error (~10-20m)
-            error_m = np.random.uniform(5, 12)  # Random error 10-20 meters
+            error_m = np.random.uniform(5, 5)  # Random error
             error_direction = np.random.uniform(0, 2 * np.pi)  # Random direction
-
-            # Convert meters to degrees
-            lat_error_deg = error_m * math.cos(error_direction) / 111000  # 1° lat ≈ 111km
+            lat_error_deg = error_m * math.cos(error_direction) / 111000
             lon_error_deg = error_m * math.sin(error_direction) / (111000 * math.cos(math.radians(drone_lat)))
             print(f"Added GPS error: {error_m:.1f}m at {math.degrees(error_direction):.1f}°")
             print(f"Error in degrees: lat={lat_error_deg:.8f}°, lon={lon_error_deg:.8f}°")
             print(f"Error in meters: lat={lat_error_deg * 111000:.2f}m, lon={lon_error_deg * (111000 * math.cos(math.radians(drone_lat))):.2f}m")
 
-            # Apply error
             drone_lat_noisy = drone_lat + lat_error_deg
             drone_lon_noisy = drone_lon + lon_error_deg
 
@@ -110,7 +84,7 @@ async def root(file: UploadFile = File(...)):
         graph = skeleton_to_graph("drone_road_skeleton_3346.tif")
 
         # 8. Match to OSM and get aligned coordinates
-        aligned_gdf = predict(
+        lat, lon = predict_with_scipy(
             drone_lat=drone_lat_noisy,
             drone_lon=drone_lon_noisy,
             altitude_m=altitude,
@@ -119,20 +93,14 @@ async def root(file: UploadFile = File(...)):
             graph=graph
         )
 
-        # 9. Extract aligned center coordinates
-        center_point = aligned_gdf.unary_union.centroid
-
-        aligned_lat = float(center_point.y)
-        aligned_lon = float(center_point.x)
-
         # 10. Clean up
         os.remove(photo_path)
 
         return {
             "status": "success",
-            "original_gps": {"lat": float(drone_lat), "lon": float(drone_lon)},
-            "aligned_gps": {"lat": aligned_lat, "lon": aligned_lon},
-            "aligned_center": f"{aligned_lat:.6f}, {aligned_lon:.6f}"
+            "original_gps": {"lat": float(drone_lat_noisy), "lon": float(drone_lon_noisy)},
+            "aligned_gps": {"lat": lat, "lon": lon},
+            "aligned_center": f"{lat:.6f}, {lon:.6f}"
         }
 
     except Exception as e:
@@ -256,5 +224,4 @@ async def photoFromVideo(file: UploadFile = File(...)):
         return {"status": "error", "message": str(e)}
 
     finally:
-        # Always release the lock
         video_processing_lock = False

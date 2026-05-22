@@ -49,7 +49,7 @@ def predict(drone_lat, drone_lon, altitude_m, image_width_px, image_height_px, g
     return align_by_shape_overlap(graph, drone_lat, drone_lon, transform)
 
 
-def align_by_shape_overlap(graph, drone_lat, drone_lon, transform, max_dist=20, buffer_m=100):
+def align_by_shape_overlap(graph, drone_lat, drone_lon, transform, max_dist=30, buffer_m=150):
     # Hardcoded flag to switch between implementations
     use_weighted_sampling = True  # Set to False for original, True for weighted
 
